@@ -59,3 +59,6 @@ card_secrets/
 # 个人fork:本地真实账号配置不应随公开fork泄露
 config.toml
 config.cloud.toml
+
+# 个人fork:项目交接笔记,仅本机留存,不随公开fork公开
+CLAUDE.md
