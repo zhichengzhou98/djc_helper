@@ -325,6 +325,8 @@ class QQLogin:
         return options
 
     def append_common_options(self, options: Options, login_type: str, login_url: str):
+        # 使用固定的持久化 profile 目录, 保留登录态以复用"记住登录", 避免每次都需重新扫码
+        options.add_argument(f"--user-data-dir={self.chrome_user_data_dir()}")
         options.add_argument(f"window-position={self.window_position_x},{self.window_position_y}")
         options.add_argument(f"window-size={self.default_window_width},{self.default_window_height}")
         options.add_argument(f"app={login_url}")
@@ -584,6 +586,17 @@ class QQLogin:
 
     def chrome_root_directory(self):
         return os.path.realpath("./utils")
+
+    def chrome_user_data_dir(self) -> str:
+        # 持久化的 Chrome profile 目录: 跨次运行保留登录态(cookie), 复用 ptlogin2 网页自带的"记住登录",
+        # 从而后续可靠 try_auto_click_avatar 免扫码登录, 而不是每次都用全新临时 profile。
+        # 按账号名分子目录: 同一 profile 不能被多个 chrome 实例同时打开, 分目录可兼容未来多账号并发。
+        # 注意: 该目录内含真实登录态, 已在 .gitignore 中忽略, 切勿提交到公开仓库。
+        profile_key = getattr(self, "name", "") or "default"
+        safe_key = "".join(ch if (ch.isalnum() or ch in "-_") else "_" for ch in profile_key)
+        path = os.path.realpath(os.path.join("./chrome_profiles", safe_key))
+        os.makedirs(path, exist_ok=True)
+        return path
 
     def is_valid_chrome_file(self, chrome_filepath) -> bool:
         if not os.path.isfile(chrome_filepath):

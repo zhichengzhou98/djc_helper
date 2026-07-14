@@ -62,3 +62,6 @@ config.cloud.toml
 
 # 个人fork:项目交接笔记,仅本机留存,不随公开fork公开
 CLAUDE.md
+
+# 个人fork:持久化chrome profile含真实登录态(cookie),绝不能提交
+chrome_profiles/
