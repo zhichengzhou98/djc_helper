@@ -55,3 +55,7 @@ ark_lottery_special_version_customized.py
 pay_by_month.py
 add_new_buy_auto_updater_user.py
 card_secrets/
+
+# 个人fork:本地真实账号配置不应随公开fork泄露
+config.toml
+config.cloud.toml
