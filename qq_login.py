@@ -354,6 +354,19 @@ class QQLogin:
             options.add_argument("--headless")
             logger.warning(f"{self.name} 在linux环境下强制使用headless模式运行chrome")
 
+        # headless Chrome 的 UA 带 "HeadlessChrome"、navigator.webdriver=true, 会被腾讯 EdgeOne 等 WAF
+        # 识别为自动化并拦截(567 Restricted Access, 登录页打不开)。若本次以 headless 运行, 则伪装成正常桌面 Chrome。
+        will_run_headless = (not is_windows()) or (
+            self.cfg.run_in_headless_mode and login_type == self.login_type_auto_login
+        )
+        if will_run_headless:
+            options.add_argument(
+                "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+            options.add_argument("--disable-blink-features=AutomationControlled")
+            options.add_experimental_option("useAutomationExtension", False)
+
         # 隐藏提示：Chrome 正收到自动测试软件的控制。
         exclude_switches.append("enable-automation")
 
