@@ -761,10 +761,46 @@ class QQLogin:
 
             replace_qr_code_tip()
 
+            # 无人值守服务器: 把当前二维码截图推送到 NapCat(仅当配置了 NAPCAT_HTTP_URL + NAPCAT_QR_PUSH_QQ 环境变量时生效)
+            self.push_qr_code_to_napcat(name)
+
             logger.info(color("bold_green") + f"{name} 尝试自动点击头像进行登录")
             self.try_auto_click_avatar(account, name, self.login_type_qr_login)
 
         return self._login(self.login_type_qr_login, login_action_fn=login_with_qr_code, login_mode=login_mode)
+
+    def push_qr_code_to_napcat(self, name: str):
+        """无人值守服务器场景: 把当前登录页(含二维码)截图, 通过 NapCat 的 OneBot11 HTTP API 推送到指定 QQ,
+        便于用手机扫码。仅当同时设置了环境变量 NAPCAT_HTTP_URL(如 http://127.0.0.1:3000) 和
+        NAPCAT_QR_PUSH_QQ(接收二维码的QQ号) 时才生效; 否则直接返回(不影响本地/Windows 正常扫码)。"""
+        napcat_url = os.environ.get("NAPCAT_HTTP_URL", "").strip()
+        target_qq = os.environ.get("NAPCAT_QR_PUSH_QQ", "").strip()
+        if napcat_url == "" or target_qq == "":
+            return
+
+        try:
+            img_b64 = self.driver.get_screenshot_as_base64()
+        except Exception as e:
+            logger.warning(f"{name} 截取二维码失败, 跳过推送: {e!r}")
+            return
+
+        try:
+            import requests
+
+            resp = requests.post(
+                napcat_url.rstrip("/") + "/send_private_msg",
+                json={
+                    "user_id": int(target_qq),
+                    "message": [
+                        {"type": "text", "data": {"text": f"[djc] 请扫码登录 {name}(二维码约2-3分钟过期, 过期会自动重发)"}},
+                        {"type": "image", "data": {"file": "base64://" + img_b64}},
+                    ],
+                },
+                timeout=15,
+            )
+            logger.info(color("bold_green") + f"{name} 已推送登录二维码到 QQ {target_qq}, NapCat HTTP {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"{name} 推送二维码到 NapCat 失败(不影响本地扫码): {e!r}")
 
     def wait_for_login_page_loaded(self):
         logger.info(f"{self.name} 等待页面加载")
