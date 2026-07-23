@@ -10,3 +10,5 @@ psutil==5.9.5
 # re: do not use leancloud 2.9.12, which will crash after pack with pyinstaller
 leancloud==2.9.11
 werkzeug<2.0.0
+# 无人值守服务器把登录二维码推送到手机时，用于将二维码最近邻放大到清晰可扫（见 qq_login._enlarge_qr_png）；不可用时会优雅退回原始截图
+Pillow==12.3.0

@@ -835,37 +835,61 @@ class QQLogin:
         """获取用于推送的二维码图片(base64 PNG)。
 
         调用时 driver 上下文已在 ptlogin 登录 iframe 内(_login_common 已完成切帧)。二维码为
-        <img id="qrlogin_img" src="....../ptqrshow?..."> , 原生仅约 87px, 整页截图里非常小、难以扫描。
-        因此优先只定位该二维码元素、用 CSS 放大到 420px(image-rendering: pixelated 保持边缘清晰, 加白色内边距
-        作为扫码静默区)后只截它; 定位失败时退回整页截图, 保证不会因优化而完全推不出图。
+        <img id="qrlogin_img" src="....../ptqrshow?..."> , 原生仅约 111px, 整页截图里非常小、难以扫描;
+        而单纯用 CSS 放大后再截图会被浏览器平滑插值糊掉(headless 下 image-rendering: pixelated 不生效, 实测扫不出)。
+        因此: 先把该 img 按其原生像素尺寸 1:1 截取(保证清晰), 再用 Pillow 最近邻插值放大并加白边(扫码静默区)。
+        定位不到二维码时退回整页截图, 保证不会因优化而完全推不出图。
         """
+        import base64
+
+        qr_el = None
         try:
             qr_candidates = self.driver.find_elements(By.CSS_SELECTOR, "img[src*='ptqrshow'], #qrlogin_img")
             qr_el = next((e for e in qr_candidates if e.is_displayed() and e.size.get("width", 0) >= 30), None)
-            if qr_el is not None:
-                # 放大并固定到视口左上角, 避免被父容器裁剪; 这是手动扫码前的最后一步, 无需还原
+        except Exception as e:
+            logger.warning(f"{name} 查找二维码元素出错: {e!r}")
+
+        if qr_el is not None:
+            try:
+                # 按二维码原生像素尺寸 1:1 展示, 避免页面把它缩小后截图发虚
                 self.driver.execute_script(
-                    """
-                    var el = arguments[0];
-                    el.style.position = 'fixed'; el.style.left = '0px'; el.style.top = '0px';
-                    el.style.width = '420px'; el.style.height = '420px';
-                    el.style.maxWidth = 'none'; el.style.maxHeight = 'none';
-                    el.style.zIndex = '2147483647'; el.style.imageRendering = 'pixelated';
-                    el.style.background = '#ffffff'; el.style.padding = '24px'; el.style.boxSizing = 'content-box';
-                    """,
+                    "var e=arguments[0]; e.style.width=e.naturalWidth+'px'; e.style.height=e.naturalHeight+'px';"
+                    " e.style.maxWidth='none'; e.style.maxHeight='none';",
                     qr_el,
                 )
                 time.sleep(0.3)
-                return qr_el.screenshot_as_base64
+                png = qr_el.screenshot_as_png
+                return base64.b64encode(self._enlarge_qr_png(png)).decode()
+            except Exception as e:
+                logger.warning(f"{name} 裁剪/放大二维码失败, 退回整页截图: {e!r}")
+        else:
             logger.warning(f"{name} 未定位到二维码元素, 退回整页截图")
-        except Exception as e:
-            logger.warning(f"{name} 裁剪二维码失败, 退回整页截图: {e!r}")
 
         try:
             return self.driver.get_screenshot_as_base64()
         except Exception as e:
             logger.warning(f"{name} 截取二维码失败, 跳过推送: {e!r}")
             return None
+
+    def _enlarge_qr_png(self, png_bytes: bytes, target: int = 520, border: int = 40) -> bytes:
+        """用最近邻插值把二维码放大到约 target 像素并加白边, 保持边缘锐利(不糊)。
+        Pillow 不可用或出错时原样返回原始截图(此时二维码较小但仍清晰)。"""
+        try:
+            import io
+
+            from PIL import Image, ImageOps
+
+            img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+            scale = max(1, round(target / max(1, img.width)))
+            if scale > 1:
+                img = img.resize((img.width * scale, img.height * scale), Image.NEAREST)
+            img = ImageOps.expand(img, border=border, fill="white")
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+        except Exception as e:
+            logger.warning(f"放大二维码失败(将使用原始尺寸截图): {e!r}")
+            return png_bytes
 
     def wait_for_login_page_loaded(self):
         logger.info(f"{self.name} 等待页面加载")
