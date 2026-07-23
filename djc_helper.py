@@ -411,7 +411,10 @@ class DjcHelper:
             # 构造一份道聚城绑定角色信息，简化改动
             djc_role_info = RoleInfo()
             djc_role_info.roleCode = role_id
-            djc_role_info.roleName = role_info_from_web.rolename
+            # 编年史领奖接口只用 serviceID + roleCode(见 get_common_params)，roleName 仅用于日志展示。
+            # 联网查询角色名需要 skey；无人值守服务器仅用心悦 token、无 skey 时查询会返回 None，
+            # 此处兜底为角色ID，避免因取 .rolename 触发 AttributeError 而使整个编年史流程崩溃。
+            djc_role_info.roleName = role_info_from_web.rolename if role_info_from_web is not None else f"角色{role_id}"
             djc_role_info.serviceID = server_id
             djc_role_info.serviceName = server_name
             djc_role_info.areaID = area_info.v
