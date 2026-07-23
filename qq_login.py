@@ -311,6 +311,18 @@ class QQLogin:
             service=Service(executable_path=self.chrome_driver_executable_path_linux()),
             options=options,
         )
+        # 腾讯 EdgeOne 等 WAF 会检测 navigator.webdriver;--app 启动时反检测脚本尚未注入,首个页面会被拦成
+        # 567 Restricted Access。此处注入 CDP 反检测脚本(抹掉 webdriver)后,重新导航到登录页——此时 webdriver
+        # 已被抹掉、UA 已伪装(见 append_common_options),EdgeOne 放行。与本地已验证可用的诊断流程保持一致。
+        try:
+            self.driver.execute_cdp_cmd(
+                "Page.addScriptToEvaluateOnNewDocument",
+                {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},
+            )
+            self.driver.set_page_load_timeout(40)
+            self.driver.get(login_url)
+        except Exception as cdp_err:
+            logger.warning(f"{self.name} 注入反检测脚本/重载登录页失败(不影响主流程): {cdp_err}")
         logger.info(color("bold_yellow") + f"{self.name} Linux环境下使用自带chrome")
 
     def new_options(self) -> Options:
@@ -325,10 +337,19 @@ class QQLogin:
         return options
 
     def append_common_options(self, options: Options, login_type: str, login_url: str):
-        # 使用固定的持久化 profile 目录, 保留登录态以复用"记住登录", 避免每次都需重新扫码
-        options.add_argument(f"--user-data-dir={self.chrome_user_data_dir()}")
+        # 本次是否以 headless 运行(linux 强制;或 Windows 配置了自动登录用 headless)
+        will_run_headless = (not is_windows()) or (
+            self.cfg.run_in_headless_mode and login_type == self.login_type_auto_login
+        )
+
+        # 持久化 profile 仅用于非 headless(桌面)复用"记住登录"。headless(服务器)下, 首个被拦页面会把 EdgeOne 的
+        # 拦截态写进 profile 从而污染后续访问, 故 headless 时使用全新临时 profile + 大窗口(与已验证可绕过 WAF 的诊断一致)。
+        if not will_run_headless:
+            options.add_argument(f"--user-data-dir={self.chrome_user_data_dir()}")
+            options.add_argument(f"window-size={self.default_window_width},{self.default_window_height}")
+        else:
+            options.add_argument("--window-size=1936,1056")
         options.add_argument(f"window-position={self.window_position_x},{self.window_position_y}")
-        options.add_argument(f"window-size={self.default_window_width},{self.default_window_height}")
         options.add_argument(f"app={login_url}")
         # 设置静音
         options.add_argument("--mute-audio")
@@ -345,20 +366,17 @@ class QQLogin:
         if self.cfg.run_in_headless_mode:
             if login_type == self.login_type_auto_login:
                 logger.warning(f"{self.name} 已配置在自动登录模式时使用headless模式运行chrome")
-                options.add_argument("--headless")
+                options.add_argument("--headless=new")
             else:
                 logger.warning(f"{self.name} 扫码登录模式不使用headless模式")
 
         # 特殊处理linux环境
         if not is_windows():
-            options.add_argument("--headless")
+            options.add_argument("--headless=new")
             logger.warning(f"{self.name} 在linux环境下强制使用headless模式运行chrome")
 
         # headless Chrome 的 UA 带 "HeadlessChrome"、navigator.webdriver=true, 会被腾讯 EdgeOne 等 WAF
         # 识别为自动化并拦截(567 Restricted Access, 登录页打不开)。若本次以 headless 运行, 则伪装成正常桌面 Chrome。
-        will_run_headless = (not is_windows()) or (
-            self.cfg.run_in_headless_mode and login_type == self.login_type_auto_login
-        )
         if will_run_headless:
             options.add_argument(
                 "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -791,10 +809,8 @@ class QQLogin:
         if napcat_url == "" or target_qq == "":
             return
 
-        try:
-            img_b64 = self.driver.get_screenshot_as_base64()
-        except Exception as e:
-            logger.warning(f"{name} 截取二维码失败, 跳过推送: {e!r}")
+        img_b64 = self._capture_qr_image_for_push(name)
+        if img_b64 is None:
             return
 
         try:
@@ -814,6 +830,42 @@ class QQLogin:
             logger.info(color("bold_green") + f"{name} 已推送登录二维码到 QQ {target_qq}, NapCat HTTP {resp.status_code}")
         except Exception as e:
             logger.warning(f"{name} 推送二维码到 NapCat 失败(不影响本地扫码): {e!r}")
+
+    def _capture_qr_image_for_push(self, name: str) -> str | None:
+        """获取用于推送的二维码图片(base64 PNG)。
+
+        调用时 driver 上下文已在 ptlogin 登录 iframe 内(_login_common 已完成切帧)。二维码为
+        <img id="qrlogin_img" src="....../ptqrshow?..."> , 原生仅约 87px, 整页截图里非常小、难以扫描。
+        因此优先只定位该二维码元素、用 CSS 放大到 420px(image-rendering: pixelated 保持边缘清晰, 加白色内边距
+        作为扫码静默区)后只截它; 定位失败时退回整页截图, 保证不会因优化而完全推不出图。
+        """
+        try:
+            qr_candidates = self.driver.find_elements(By.CSS_SELECTOR, "img[src*='ptqrshow'], #qrlogin_img")
+            qr_el = next((e for e in qr_candidates if e.is_displayed() and e.size.get("width", 0) >= 30), None)
+            if qr_el is not None:
+                # 放大并固定到视口左上角, 避免被父容器裁剪; 这是手动扫码前的最后一步, 无需还原
+                self.driver.execute_script(
+                    """
+                    var el = arguments[0];
+                    el.style.position = 'fixed'; el.style.left = '0px'; el.style.top = '0px';
+                    el.style.width = '420px'; el.style.height = '420px';
+                    el.style.maxWidth = 'none'; el.style.maxHeight = 'none';
+                    el.style.zIndex = '2147483647'; el.style.imageRendering = 'pixelated';
+                    el.style.background = '#ffffff'; el.style.padding = '24px'; el.style.boxSizing = 'content-box';
+                    """,
+                    qr_el,
+                )
+                time.sleep(0.3)
+                return qr_el.screenshot_as_base64
+            logger.warning(f"{name} 未定位到二维码元素, 退回整页截图")
+        except Exception as e:
+            logger.warning(f"{name} 裁剪二维码失败, 退回整页截图: {e!r}")
+
+        try:
+            return self.driver.get_screenshot_as_base64()
+        except Exception as e:
+            logger.warning(f"{name} 截取二维码失败, 跳过推送: {e!r}")
+            return None
 
     def wait_for_login_page_loaded(self):
         logger.info(f"{self.name} 等待页面加载")
